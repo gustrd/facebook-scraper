@@ -125,3 +125,11 @@ dmypy.json
 
 # VSCode
 .vscode
+
+# User-specific files
+cookies.txt
+error.txt
+*.csv
+*.json
+photos/
+photos_*/

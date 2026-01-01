@@ -120,6 +120,19 @@ def run():
         '--friends', type=int, help='When extracting a profile, how many friends to extract'
     )
     parser.add_argument(
+        '--photos',
+        action='store_true',
+        help="Extract photos from an account's photo gallery",
+        default=False,
+    )
+    parser.add_argument(
+        '--download-folder',
+        type=pathlib.Path,
+        dest='download_folder',
+        help="Download photos to this folder (use with --photos)",
+        default=None,
+    )
+    parser.add_argument(
         '-ppp',
         '--posts-per-page',
         dest='posts_per_page',
@@ -196,6 +209,8 @@ def run():
             pages=args.pages,
             encoding=args.encoding,
             dump_location=args.dump_location,
+            photos=args.photos,
+            download_folder=args.download_folder,
         )
 
 

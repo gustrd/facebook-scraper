@@ -309,6 +309,106 @@ for i in range(1, 101):
 
 ```
 
+## Photo Scraping with Selenium
+
+For profiles where the standard scraper doesn't work (e.g., when Facebook redirects mobile URLs to desktop), we provide a Selenium-based photo scraper that works with desktop Facebook.
+
+### Features
+
+- Downloads **full-resolution photos** (not thumbnails)
+- Works with desktop Facebook (www.facebook.com)
+- Supports two photo tabs:
+  - `by`: Photos uploaded by the user
+  - `of`: Photos the user is tagged in
+- **Incremental download**: Scrolls slowly and downloads photos between scrolls
+- **Automatic duplicate detection**: Checks filenames to skip already downloaded photos
+- **Resume capability**: Run again with `--resume` to continue downloading
+- Smart end detection (stops when no more photos load after 10 iterations)
+- Manual login support (handles any authentication method)
+
+### Requirements
+
+```bash
+pip install selenium webdriver-manager
+```
+
+### Usage
+
+```bash
+# Download photos uploaded by user
+python selenium_photos_scraper.py --username "USERNAME" --output ./photos --tab by
+
+# Download photos user is tagged in
+python selenium_photos_scraper.py --username "USERNAME" --output ./photos --tab of
+
+# Resume a previous download (skips already downloaded photos)
+python selenium_photos_scraper.py --username "USERNAME" --output ./photos --tab by --resume
+
+# Limit number of photos
+python selenium_photos_scraper.py --username "USERNAME" --output ./photos --tab by --limit 50
+
+# Increase scroll iterations for large galleries (default: 300)
+python selenium_photos_scraper.py --username "USERNAME" --output ./photos --tab by --scrolls 500
+```
+
+### How It Works
+
+The scraper uses an **incremental approach** to ensure all photos are loaded:
+
+1. Opens Facebook in a Chrome browser window
+2. Waits for you to manually log in
+3. Navigates to the user's photo gallery
+4. **Scrolls a little bit** to load new photos
+5. **Downloads new photos** that appeared (checks filenames to avoid duplicates)
+6. **Returns to gallery and scrolls more**
+7. Repeats steps 4-6 until no new photos appear
+
+This slow, incremental approach gives Facebook plenty of time to load all content, ensuring you get all available photos.
+
+### Output
+
+Photos are saved with the following naming pattern:
+- Single image post: `{post_id}.jpg`
+- Multiple images post: `{post_id}_0.jpg`, `{post_id}_1.jpg`, etc.
+
+Example:
+```
+photos/
+├── 123456789_0.jpg  (1040x584 pixels)
+├── 123456789_1.jpg  (910x1213 pixels)
+├── 987654321.jpg    (2048x1536 pixels)
+└── ...
+```
+
+### Important Notes
+
+- **Manual Login**: You must log in manually when the browser opens
+- **Incremental Download**: The script downloads photos while scrolling, giving Facebook time to load all content
+- **Duplicate Detection**: Automatically skips photos that are already in the output folder (checks by filename)
+- **Resume Anytime**: You can stop and restart - use `--resume` flag to continue where you left off
+- **Auto-Stop**: Automatically stops after 10 iterations with no new photos
+- **Default: 300 iterations**: Each iteration = scroll + download visible photos (increase with `--scrolls` if needed)
+- **Desktop Only**: Works with desktop Facebook (www.facebook.com), not mobile
+- **Privacy**: Only downloads photos you have access to when logged in
+
+### Troubleshooting
+
+**Not getting all photos (e.g., 98 out of 480):**
+- Increase scroll iterations: `--scrolls 500` or `--scrolls 1000`
+- The script waits 3-6 seconds between scrolls, but Facebook can be slow
+- For very large galleries (500+ photos), you may need even more iterations
+
+**Script seems slow:**
+- This is intentional! The slow, incremental approach ensures Facebook loads all content
+- Each iteration: scroll (4-5 seconds) + download visible photos (2-4 seconds each)
+- For 480 photos, expect 1-2 hours to complete
+
+**Want to resume after stopping:**
+- Just run the same command again with `--resume` flag
+- The script will skip photos that are already downloaded (checks filenames)
+
+For more details on cookies and authentication, see [COOKIES_GUIDE.md](COOKIES_GUIDE.md).
+
 ## To-Do
 
 - Async support

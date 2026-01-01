@@ -7,6 +7,7 @@ import sys
 import warnings
 import pickle
 from typing import Any, Dict, Iterator, Optional, Set, Union
+import random
 
 from requests.cookies import cookiejar_from_dict
 
@@ -370,11 +371,42 @@ def write_post_to_disk(post: Post, source: RawPost, location: pathlib.Path):
         f.write(html_element_to_string(source, pretty=True))
 
 
+def download_photo(url: str, folder: pathlib.Path, filename: str) -> bool:
+    """Download a photo from URL to a folder
+
+    Args:
+        url (str): The URL of the photo
+        folder (pathlib.Path): The folder to save the photo
+        filename (str): The filename to save as
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    import requests
+
+    try:
+        response = requests.get(url, timeout=30)
+        if response.status_code == 200:
+            filepath = folder / filename
+            with open(filepath, 'wb') as f:
+                f.write(response.content)
+            logger.debug(f"Downloaded photo: {filename}")
+            return True
+        else:
+            logger.warning(f"Failed to download {url}: HTTP {response.status_code}")
+            return False
+    except Exception as e:
+        logger.warning(f"Error downloading {url}: {e}")
+        return False
+
+
 def write_posts_to_csv(
     account: Optional[str] = None,
     group: Union[str, int, None] = None,
     filename: str = None,
     encoding: str = None,
+    photos: bool = False,
+    download_folder: Optional[pathlib.Path] = None,
     **kwargs,
 ):
     """Write posts from an account or group to a CSV or JSON file
@@ -384,6 +416,8 @@ def write_posts_to_csv(
         group (Union[str, int, None]): Facebook group id e.g. 676845025728409
         filename (str): Filename, defaults to <account or group>_posts.csv
         encoding (str): Encoding for the output file, defaults to locale.getpreferredencoding()
+        photos (bool): Set to True to extract photos instead of posts. Defaults to False.
+        download_folder (Optional[pathlib.Path]): Folder to download photos to. Only works with photos=True.
         credentials (Optional[Tuple[str, str]]): Tuple of email and password to login before scraping. Defaults to scrape anonymously
         timeout (Optional[int]): Timeout for requests.
         page_limit (Optional[int]): How many pages of posts to go through.
@@ -395,6 +429,13 @@ def write_posts_to_csv(
     if dump_location is not None:
         dump_location.mkdir(exist_ok=True)
         kwargs["remove_source"] = False
+
+    # Setup download folder if specified
+    if download_folder is not None:
+        if not photos:
+            raise ValueError("download_folder can only be used with photos=True")
+        download_folder.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Photos will be downloaded to: {download_folder}")
 
     # Set a default filename, based on the account name with the appropriate extension
     if filename is None:
@@ -438,13 +479,26 @@ def write_posts_to_csv(
     keys = kwargs.get("keys")
 
     try:
-        for post in get_posts(
-            account=account,
-            group=group,
-            start_url=start_url,
-            request_url_callback=handle_pagination_url,
-            **kwargs,
-        ):
+        # Use get_photos if photos mode is enabled, otherwise use get_posts
+        if photos:
+            if group is not None:
+                raise ValueError("Photos mode is only supported for accounts, not groups")
+            # Note: get_photos doesn't support start_url or request_url_callback
+            # It always starts from the account's photos page
+            posts_iterator = get_photos(
+                account=account,
+                **kwargs,
+            )
+        else:
+            posts_iterator = get_posts(
+                account=account,
+                group=group,
+                start_url=start_url,
+                request_url_callback=handle_pagination_url,
+                **kwargs,
+            )
+
+        for post in posts_iterator:
             if dump_location is not None:
                 source = post.pop('source')
                 try:
@@ -453,6 +507,29 @@ def write_posts_to_csv(
                     logger.exception("Error writing post to disk")
             elif post.get("source"):
                 post["source"] = post["source"].html
+
+            # Download photos if download_folder is specified
+            if download_folder is not None and post.get('images'):
+                post_id = post.get('post_id', 'unknown')
+                for i, image_url in enumerate(post['images']):
+                    # Determine file extension from URL or default to .jpg
+                    ext = '.jpg'
+                    if '.' in image_url.split('/')[-1].split('?')[0]:
+                        ext = '.' + image_url.split('/')[-1].split('?')[0].split('.')[-1]
+
+                    # Create filename: post_id_index.ext
+                    if len(post['images']) == 1:
+                        filename = f"{post_id}{ext}"
+                    else:
+                        filename = f"{post_id}_{i}{ext}"
+
+                    download_photo(image_url, download_folder, filename)
+
+                    # Random sleep between 0.5 and 2.0 seconds to avoid rate limiting
+                    sleep_time = random.uniform(0.5, 2.0)
+                    logger.debug(f"Sleeping {sleep_time:.2f} seconds before next download")
+                    time.sleep(sleep_time)
+
             if first_post:
                 if kwargs.get("format") == "json":
                     output_file.write("[\n")
