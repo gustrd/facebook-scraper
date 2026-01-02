@@ -133,3 +133,4 @@ error.txt
 *.json
 photos/
 photos_*/
+uv.lock
