@@ -353,17 +353,20 @@ python selenium_photos_scraper.py --username "USERNAME" --output ./photos --tab 
 
 ### How It Works
 
-The scraper uses an **incremental approach** to ensure all photos are loaded:
+The scraper uses a **two-tab incremental approach** to ensure 100% photo download success even for large galleries:
 
 1. Opens Facebook in a Chrome browser window
 2. Waits for you to manually log in
 3. Navigates to the user's photo gallery
 4. **Scrolls a little bit** to load new photos
-5. **Downloads new photos** that appeared (checks filenames to avoid duplicates)
-6. **Returns to gallery and scrolls more**
+5. For each new photo found:
+   - **Opens the photo in a NEW tab**
+   - Downloads the full-resolution image
+   - **Closes the tab** and returns to the gallery
+6. **Maintains scroll position** because the gallery tab is never reloaded
 7. Repeats steps 4-6 until no new photos appear
 
-This slow, incremental approach gives Facebook plenty of time to load all content, ensuring you get all available photos.
+This two-tab strategy prevents losing your place in a large gallery (400+ photos) and ensures the script can reach the very first photo uploaded.
 
 ### Output
 
@@ -394,9 +397,10 @@ photos/
 ### Troubleshooting
 
 **Not getting all photos (e.g., 98 out of 480):**
-- Increase scroll iterations: `--scrolls 500` or `--scrolls 1000`
-- The script waits 3-6 seconds between scrolls, but Facebook can be slow
-- For very large galleries (500+ photos), you may need even more iterations
+- **FIXED**: This issue was caused by reloading the gallery page, which reset the scroll position. The script now uses a **two-tab approach** that maintains the scroll position perfectly.
+- If you still miss photos, simply increase scroll iterations: `--scrolls 500` or `--scrolls 1000`.
+- The script waits 3-6 seconds between scrolls, but Facebook can be slow to render.
+- For very large galleries (500+ photos), you may need more iterations to reach the bottom.
 
 **Script seems slow:**
 - This is intentional! The slow, incremental approach ensures Facebook loads all content

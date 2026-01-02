@@ -28,6 +28,7 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse, parse_qs
 import requests
 import re
+import hashlib
 
 def scrape_photos_selenium(username, output_folder, tab="by", max_scrolls=300, limit=None, resume=False):
     """
@@ -71,20 +72,19 @@ def scrape_photos_selenium(username, output_folder, tab="by", max_scrolls=300, l
     failed_count = 0
     skipped_count = 0
 
-    # Get existing files to check for duplicates
-    def get_existing_photo_ids():
-        """Get set of photo IDs that are already downloaded"""
-        existing_ids = set()
+    # Get existing hashes to check for duplicates
+    def get_existing_hashes():
+        """Get set of file hashes that are already downloaded"""
+        hashes = set()
         for filepath in output_folder.glob('*'):
             if filepath.is_file() and not filepath.name.startswith('.'):
-                # Extract ID from filename (everything before the extension)
-                photo_id = filepath.stem
-                existing_ids.add(photo_id)
-        return existing_ids
+                # We assume the filename is the hash
+                hashes.add(filepath.stem)
+        return hashes
 
-    existing_ids = get_existing_photo_ids()
-    if existing_ids:
-        print(f"📂 Found {len(existing_ids)} existing photos in output folder")
+    existing_hashes = get_existing_hashes()
+    if existing_hashes:
+        print(f"📂 Found {len(existing_hashes)} existing photos in output folder")
         if resume:
             print(f"   Will skip these photos and continue downloading new ones")
 
@@ -96,6 +96,12 @@ def scrape_photos_selenium(username, output_folder, tab="by", max_scrolls=300, l
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--disable-blink-features=AutomationControlled')
     options.add_argument('--start-maximized')
+    
+    # Suppress noise and GCM errors
+    options.add_argument('--disable-background-networking')
+    options.add_argument('--disable-features=GCM')
+    options.add_argument('--log-level=3')
+    options.add_experimental_option('excludeSwitches', ['enable-logging'])
 
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     wait = WebDriverWait(driver, 10)
@@ -111,8 +117,8 @@ def scrape_photos_selenium(username, output_folder, tab="by", max_scrolls=300, l
         # Navigate to appropriate photos tab
         if tab.lower() == "by":
             # Photos uploaded by the user
-            photos_url = f"https://www.facebook.com/{username}/photos"
-            print(f"Navigating to 'Photos by {username}'...")
+            photos_url = f"https://www.facebook.com/{username}/photos_all"
+            print(f"Navigating to 'Photos by {username}' (uploads)...")
         elif tab.lower() == "of":
             # Photos user is tagged in
             photos_url = f"https://www.facebook.com/{username}/photos_of"
@@ -124,11 +130,23 @@ def scrape_photos_selenium(username, output_folder, tab="by", max_scrolls=300, l
         driver.get(photos_url)
         time.sleep(5)  # Give page time to load initially
 
+        # Store the main gallery window handle
+        gallery_handle = driver.current_window_handle
+        
+        # Create a dedicated worker window for downloads
+        print("Opening secondary window for photo processing...")
+        driver.execute_script("window.open('about:blank', 'download_window', 'width=1000,height=800');")
+        # Identify handles
+        all_handles = driver.window_handles
+        download_handle = [h for h in all_handles if h != gallery_handle][0]
+        
+        # Switch back to gallery to start
+        driver.switch_to.window(gallery_handle)
+
         print(f"\n{'='*70}")
         print(f"Starting incremental scroll & download process")
-        print(f"Max scroll iterations: {max_scrolls}")
-        print(f"Strategy: Scroll slowly, download photos in between scrolls")
-        print(f"This gives Facebook time to load all content")
+        print(f"Strategy: Main window stays on gallery, secondary window downloads photos")
+        print(f"Max iterations: {max_scrolls}")
         print(f"{'='*70}\n")
 
         no_new_photos_count = 0
@@ -193,22 +211,15 @@ def scrape_photos_selenium(username, output_folder, tab="by", max_scrolls=300, l
                         break
 
                     try:
-                        # Extract photo ID from URL first to check if we already have it
-                        photo_id = None
-                        if 'fbid=' in photo_url:
-                            match = re.search(r'fbid=(\d+)', photo_url)
-                            if match:
-                                photo_id = match.group(1)
-
-                        # If we can't get ID from URL, we'll need to visit the page
-                        if photo_id and photo_id in existing_ids:
-                            print(f"\n  [{idx}/{new_photos_count}] ⏭️  Already downloaded: {photo_id}")
-                            skipped_count += 1
-                            continue
+                        # If we can extract an ID from URL, we can still skip BEFORE visiting if we've seen it 
+                        # but since we're using hashes for filenames now, we'll mainly rely on content hash.
+                        # However, to save time, let's keep a session-based skip if the URL is identical.
+                        # (processed_urls already handles this)
 
                         print(f"\n  [{idx}/{new_photos_count}] Processing photo...")
 
-                        # Navigate to the photo page
+                        # Switch to download window and load photo
+                        driver.switch_to.window(download_handle)
                         driver.get(photo_url)
                         time.sleep(random.uniform(2, 4))
 
@@ -252,9 +263,6 @@ def scrape_photos_selenium(username, output_folder, tab="by", max_scrolls=300, l
                         if not full_img:
                             print(f"    ❌ Could not find full-size image")
                             failed_count += 1
-                            # Go back to photo gallery
-                            driver.get(photos_url)
-                            time.sleep(2)
                             continue
 
                         # Get the image URL
@@ -263,47 +271,32 @@ def scrape_photos_selenium(username, output_folder, tab="by", max_scrolls=300, l
                         if not img_url or img_url.startswith('data:'):
                             print(f"    ❌ Invalid image URL")
                             failed_count += 1
-                            # Go back to photo gallery
-                            driver.get(photos_url)
-                            time.sleep(2)
                             continue
 
-                        # Extract photo ID - try from URL first, then from img_url
-                        if not photo_id:
-                            # Try to extract from img_url
-                            match = re.search(r'/(\d{10,})_', img_url)
-                            if match:
-                                photo_id = match.group(1)
-                            else:
-                                photo_id = f"photo_{downloaded_count + 1:04d}"
-
-                        # Determine file extension
-                        ext = '.jpg'
-                        if '.' in img_url.split('/')[-1].split('?')[0]:
-                            url_ext = img_url.split('/')[-1].split('?')[0].split('.')[-1]
-                            if url_ext.lower() in ['jpg', 'jpeg', 'png', 'gif', 'webp']:
-                                ext = '.' + url_ext.lower()
-
-                        filename = f"{photo_id}{ext}"
-                        filepath = output_folder / filename
-
-                        # Double-check if file already exists (in case ID wasn't in URL)
-                        if filepath.exists():
-                            print(f"    ⏭️  Already exists: {filename}")
-                            skipped_count += 1
-                            existing_ids.add(photo_id)
-                            # Go back to photo gallery
-                            driver.get(photos_url)
-                            time.sleep(2)
-                            continue
-
-                        print(f"    📥 Downloading: {filename}")
-                        print(f"       Size: {full_img.size['width']}x{full_img.size['height']} pixels")
-
-                        # Download the image
+                        # Download the image to memory first
                         response = requests.get(img_url, timeout=30)
 
                         if response.status_code == 200:
+                            # Calculate hash of content
+                            content_hash = hashlib.md5(response.content).hexdigest()
+                            
+                            # Determine file extension
+                            ext = '.jpg'
+                            if '.' in img_url.split('/')[-1].split('?')[0]:
+                                url_ext = img_url.split('/')[-1].split('?')[0].split('.')[-1]
+                                if url_ext.lower() in ['jpg', 'jpeg', 'png', 'gif', 'webp']:
+                                    ext = '.' + url_ext.lower()
+
+                            filename = f"{content_hash}{ext}"
+                            filepath = output_folder / filename
+
+                            # Check if hash already exists
+                            if filepath.exists() or content_hash in existing_hashes:
+                                print(f"    ⏭️  Already exists (duplicate content): {filename}")
+                                skipped_count += 1
+                                existing_hashes.add(content_hash)
+                                continue
+
                             with open(filepath, 'wb') as f:
                                 f.write(response.content)
 
@@ -315,8 +308,9 @@ def scrape_photos_selenium(username, output_folder, tab="by", max_scrolls=300, l
                                 failed_count += 1
                             else:
                                 print(f"    ✅ Downloaded ({file_size:,} bytes)")
+                                print(f"       Hash: {content_hash}")
                                 downloaded_count += 1
-                                existing_ids.add(photo_id)  # Add to existing IDs
+                                existing_hashes.add(content_hash)
 
                             # Random delay to avoid rate limiting
                             time.sleep(random.uniform(1, 3))
@@ -324,20 +318,15 @@ def scrape_photos_selenium(username, output_folder, tab="by", max_scrolls=300, l
                             print(f"    ❌ Failed: HTTP {response.status_code}")
                             failed_count += 1
 
-                        # Go back to photo gallery for next photo
-                        driver.get(photos_url)
-                        time.sleep(random.uniform(2, 4))
-
                     except Exception as e:
                         print(f"    ❌ Error: {e}")
                         failed_count += 1
-                        # Try to go back to photo gallery
+                    finally:
+                        # ALWAYS return focus to gallery window
                         try:
-                            driver.get(photos_url)
-                            time.sleep(2)
+                            driver.switch_to.window(gallery_handle)
                         except:
                             pass
-                        continue
 
                 print(f"\n✓ Finished downloading batch")
                 print(f"  Downloaded this session: {downloaded_count}")
@@ -353,8 +342,12 @@ def scrape_photos_selenium(username, output_folder, tab="by", max_scrolls=300, l
                     break
 
             # Now scroll down slowly to load more photos
-            print(f"\n📜 Scrolling down to load more photos...")
+            print(f"\nScroll complete: Found {photos_on_page} total, {new_photos_count} new.")
+            print(f"📜 Scrolling gallery to load more...")
 
+            # Ensure gallery window is focused for scrolling
+            driver.switch_to.window(gallery_handle)
+            
             viewport_height = driver.execute_script("return window.innerHeight;")
             scroll_increment = int(viewport_height * 0.5)  # Scroll 50% of viewport (slower)
 
@@ -374,7 +367,7 @@ def scrape_photos_selenium(username, output_folder, tab="by", max_scrolls=300, l
         print(f"Downloaded this session: {downloaded_count}")
         print(f"Skipped (already exist): {skipped_count}")
         print(f"Failed: {failed_count}")
-        print(f"Total photos in folder: {len(existing_ids)}")
+        print(f"Total unique photos in folder: {len(existing_hashes)}")
         print(f"Saved to: {output_folder.absolute()}")
         print(f"\nYou can run this again with --resume to continue (skips existing files)")
         print(f"{'='*70}")
